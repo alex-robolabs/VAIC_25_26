@@ -398,3 +398,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Local handoff brief — contains lab IPs and credentials, do not commit to public repo
+CLAUDE.md
