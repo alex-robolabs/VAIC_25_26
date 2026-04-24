@@ -1,3 +1,65 @@
+# VAIC_25_26 — Robolabs fork
+
+This is Robolabs' fork of VEX's `VAIC_25_26` reference repository for
+the VEX AI Competition. It tracks
+[VEX-Robotics/VAIC_25_26](https://github.com/VEX-Robotics/VAIC_25_26)
+upstream and carries a self-healing V5 ↔ Jetson comms patch that
+makes the reference architecture suitable for real development loops
+rather than just match-day operation.
+
+## What's different from upstream
+
+The Jetson-side serial connection manager has been rewritten to
+reconnect automatically after V5 reprograms, battery swaps, USB drops,
+and silent stalls. The wire protocol is unchanged — no V5 brain
+firmware changes are required.
+
+- Technical writeup: **[`docs/comms-patch.md`](./docs/comms-patch.md)**
+- Deployment guide: **[`JetsonExample/DEPLOY.md`](./JetsonExample/DEPLOY.md)**
+
+If you're picking up a Jetson that's already running the patch, the
+success signal is simple: check the V5 Brain's LCD dashboard for
+`Packets > 0` and increasing.
+
+## Quick start
+
+Deploy to one Jetson from your Mac:
+
+```bash
+cd JetsonExample/Scripts
+./deploy.sh <jetson-ip>
+```
+
+Then look at the V5 Brain's LCD — that's the ground truth. See
+`DEPLOY.md` for prereqs, SSH-key setup, troubleshooting, and the
+alternative deploy paths (USB stick, manual scp).
+
+## Upstream tracking
+
+```
+origin    https://github.com/alex-robolabs/VAIC_25_26
+upstream  https://github.com/VEX-Robotics/VAIC_25_26
+```
+
+To pull upstream changes:
+
+```bash
+git fetch upstream
+git merge upstream/main
+```
+
+The patch lives entirely in `JetsonExample/` and `docs/`, so upstream
+merges should stay clean.
+
+---
+
+## Original VEX README
+
+The original VEX-authored README content is preserved below for
+reference.
+
+---
+
 # The VEX AI Competition (VAIC) System
 
 ## [JetsonExample](./JetsonExample/README.md)
