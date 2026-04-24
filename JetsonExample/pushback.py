@@ -4,7 +4,10 @@ import numpy as np
 import cv2
 import time
 import os
+import logging
 from glob import glob
+
+log = logging.getLogger("vexai.pushback")
 
 from V5MapPosition import MapPosition
 
@@ -258,6 +261,7 @@ class MainApp:
         self.v5Web.start()
         run_time = time.time()
         print("\nStarting Loop")
+        last_health_log = 0.0
         try:
             while True:
                 start_time = time.time()  # start time of the loop
@@ -272,10 +276,20 @@ class MainApp:
                 self.rendering.set_detection_data(aiRecord)
                 self.rendering.set_stats(self.stats, self.v5Pos, start_time, invoke_time, run_time)
                 # self.rendering.display_output(output)
+                # Periodic health log for post-mortem visibility in journald.
+                now = time.time()
+                if now - last_health_log > 30:
+                    last_health_log = now
+                    log.info("health: data=%s gps=%s fps=%.1f",
+                             self.v5.is_healthy(),
+                             self.v5Pos.is_healthy(),
+                             self.stats.fps)
         finally:
             self.camera.stop()
 
 
 if __name__ == "__main__":
+    from vexai_logging import configure_logging
+    configure_logging()
     app = MainApp()  # Create the main application
     app.run()  # Run the application

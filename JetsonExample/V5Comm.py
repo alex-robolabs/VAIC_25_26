@@ -1,62 +1,75 @@
-from ctypes import Array
+"""Jetson <-> V5 Brain data link.
+
+Wire protocol (unchanged from original VEX reference implementation):
+  - V5 polls with the ASCII line "AA55CC3301\\n"
+  - Jetson responds with one binary V5SerialPacket:
+        [0xAA 0x55 0xCC 0x33][length:u16][type:u16][crc32:u32][payload]
+  - Repeats at the V5's poll rate.
+
+The protocol classes (ImageDetection, MapDetection, Detection, AIRecord,
+V5SerialPacket) are preserved verbatim — they are correct. The connection
+manager (V5SerialComms) now subclasses SerialLink for self-healing
+reconnection, watchdog, and structured logging.
+
+Public API is unchanged:
+    v5 = V5SerialComms()
+    v5.start()
+    v5.setDetectionData(aiRecord)
+    v5.stop()
+    v5.is_healthy()    # NEW — use this for dashboard health indicators
+"""
+
 import struct
 import threading
 from threading import Lock
-import json
-from json import JSONEncoder
-import serial
-import time
+
 from V5Position import Position
-    
+from serial_link import SerialLink
+
+
 class ImageDetection:
-    def __init__(self, x: int, y: int, width: int, height: int):
-        # Initialize properties of ImageDetection class for x, y coordinates, width, and height
+    def __init__(self, x, y, width, height):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
 
     def to_Serial(self):
-        # Convert ImageDetection properties to serialized binary format
         return struct.pack('<iiii', self.x, self.y, self.width, self.height)
-    
+
     def to_JSON(self):
-        # Convert ImageDetection properties to JSON format
         return self.__dict__
 
+
 class MapDetection:
-    def __init__(self, x: float, y: float, z: float):
-        # Initialize properties of MapDetection class for x, y, z coordinates
+    def __init__(self, x, y, z):
         self.x = x
         self.y = y
         self.z = z
 
     def to_Serial(self):
-        # Convert MapDetection properties to serialized binary format
         return struct.pack('<fff', self.x, self.y, self.z)
-    
+
     def to_JSON(self):
-        # Convert MapDetection properties to JSON format
         return self.__dict__
-    
+
+
 class Detection:
-    def __init__(self, classID: int, probability: float, depth: float, screenLocation: ImageDetection, mapLocation: MapDetection):
-        # Initialize properties of Detection class, including class ID, probability, depth, and locations on screen and on the field
+    def __init__(self, classID, probability, depth, screenLocation, mapLocation):
         self.classID = classID
         self.probability = probability
         self.depth = depth
         self.screenLocation = screenLocation
+        # Note: misspelling "mapLocattion" preserved — V5Web.py reads this field by name.
         self.mapLocattion = mapLocation
 
     def to_Serial(self):
-        # Convert Detection properties to serialized binary format
         data = struct.pack('<iff', self.classID, self.probability, self.depth)
         data += self.screenLocation.to_Serial()
         data += self.mapLocattion.to_Serial()
         return data
-    
+
     def to_JSON(self):
-        # Convert Detection properties to JSON format
         outData = {}
         outData['class'] = self.classID
         outData['prob'] = self.probability
@@ -67,29 +80,27 @@ class Detection:
 
 
 class AIRecord:
-    # The AIRecord is what is communicated from the Jetson to the V5 Brain as a detection
-    def __init__(self, position: Position, detections: "list[Detection]"):
-        # Initialize properties of AIRecord class, including position and detections list
+    """The record transmitted from Jetson to V5 Brain per poll."""
+
+    def __init__(self, position, detections):
         self.position = position
         self.detections = detections
 
     def to_Serial(self):
-        # Convert AIRecord properties to serialized binary format
         data = struct.pack('<i', len(self.detections))
         data += self.position.to_Serial()
         for det in self.detections:
             data += det.to_Serial()
         return data
-    
+
     def to_JSON(self):
-        # Convert AIRecord properties to JSON format
         outData = {}
         outData['position'] = self.position.to_JSON()
         outData['detections'] = [det.to_JSON() for det in self.detections]
         return outData
 
+    # CRC-32 (MPEG-2 variant, no reflect, no xor-out). Unchanged.
     POLYNOMIAL_CRC32 = 0x04C11DB7
-
     __crc32_table = [0] * 256
     __table32Generated = 0
 
@@ -105,7 +116,6 @@ class AIRecord:
         AIRecord.__table32Generated = 1
 
     def __Crc32Generate(self, data, accumulator):
-        i, j = 0, 0
         if not AIRecord.__table32Generated:
             self.__Crc32GenerateTable()
         for j in range(len(data)):
@@ -117,104 +127,81 @@ class AIRecord:
         data = self.to_Serial()
         crc = self.__Crc32Generate(data, 0) & 0xFFFFFFFF
         return crc
-    
+
 
 class V5SerialPacket:
-    def __init__(self, type: int, detections: AIRecord):
-        # Initialize properties of V5SerialPacket class, including type and detections
+    def __init__(self, type, detections):
         self.__length = len(detections.to_Serial())
-        self.__type = type        # 2 bytes
+        self.__type = type
         self.__detections = detections
 
     def to_Serial(self):
-        # Convert V5SerialPacket properties to serialized binary format
         data = bytearray([0xAA, 0x55, 0xCC, 0x33])
-        data += struct.pack('<HHI', self.__length, self.__type, self.__detections.getCRC32())
+        data += struct.pack('<HHI',
+                            self.__length, self.__type,
+                            self.__detections.getCRC32())
         data += self.__detections.to_Serial()
         return data
 
-class V5SerialComms:
 
-    __MAP_PACKET_TYPE = 0x0001
+class V5SerialComms(SerialLink):
+    """Self-healing V5 data link. See module docstring for protocol."""
 
-    def __init__(self, port = None):
-        # Initialize properties of V5SerialComms class, including port, started status, and lock
-        self.__dev = port
-        self.__started = False
-        self.__ser = None
-        self.__detections = AIRecord(Position(0, 0, 0, 0, 0, 0, 0, 0), [])
-        self.__detectionLock = Lock()
+    _MAP_PACKET_TYPE = 0x0001
+    _HANDSHAKE = "AA55CC3301"
 
-    def start(self):
-        # Start serial communication thread
-        self.__started = True
-        self.__thread = threading.Thread(target=self.__run, args=())
-        self.__thread.daemon = True
-        self.__thread.start()
+    def __init__(self, port=None):
+        # `port` preserved for backwards compatibility; None means auto-discover.
+        super().__init__(
+            name="v5-data",
+            port_filter=lambda d: "V5" in d.description and "User" in d.description,
+            baudrate=115200,
+            read_timeout=1.0,
+            watchdog_seconds=5.0,
+        )
+        self._explicit_port = port
+        self._detections = AIRecord(Position(0, 0, 0, 0, 0, 0, 0, 0), [])
+        self._detection_lock = Lock()
+        self._handshakes_received = 0
+        self._packets_sent = 0
 
-    def __run(self):
-        count = 1
-        while self.__started:  # Continue running while the thread is started
-            port = self.__dev
-            try:
-                if(port == None):  # If the port is not specified
-                    from serial.tools.list_ports import comports
-                    # Find devices that match the V5 description
-                    devices = [dev for dev in comports() if "V5" in dev.description and "User" in dev.description]
-                    # self.devices = [dev for dev in comports()]
-                    # print(self.devices)
-                    if(len(devices) == 0 and count <= 5):
-                        print("No V5 Brain detected.")
-                        time.sleep(1)  # Wait for 1 second before retrying
-                        count += 1
-                        continue
-                    elif(count > 5):
-                        return None  # Return None if no devices found after 5 tries
-                        break
-                    else:
-                        port = devices[0].device  # Return None if no devices found after 3 tries
-                    
-                print("Connecting to ", port)
+    # ---------- public API (preserved) ----------
 
-                # Establish serial connection with the port
-                self.__ser = serial.Serial(port, 115200, timeout=10)
-                self.__ser.flushInput()
-                self.__ser.flushOutput()
+    def setDetectionData(self, data):
+        """Update the payload that will be written on the next poll."""
+        with self._detection_lock:
+            self._detections = data
 
-                while self.__started:  # Continue reading while thread is started
-                    # Read data from the serial port
-                    data = self.__ser.readline().decode("utf-8").rstrip()
-                    # print(data)
-                    if(data == "AA55CC3301"):
-                        #send data
-                        self.__detectionLock.acquire()
-                        myPacket = V5SerialPacket(self.__MAP_PACKET_TYPE, self.__detections)
-                        self.__detectionLock.release()
-                        data = myPacket.to_Serial()
-                        self.__ser.write(data)  # Write serialized data to the serial port
+    def get_stats(self):
+        s = super().get_stats()
+        s["handshakes_received"] = self._handshakes_received
+        s["packets_sent"] = self._packets_sent
+        return s
 
+    # ---------- SerialLink overrides ----------
 
-            # To close the serial port gracefully, use Ctrl+C to break the loop
-            except serial.SerialException as e:
-                print("Could not connect to ", port, ". Exception: ", e)
-                time.sleep(1)    # Wait for 1 second before retrying
-        
-            if(self.__ser.isOpen()):
-                self.__ser.close()    # Close the serial port if open
+    def _find_port(self):
+        if self._explicit_port is not None:
+            return self._explicit_port
+        return super()._find_port()
 
-        print("V5SerialComms thread stopped.")
-
-    def setDetectionData(self, data: AIRecord):
-        # Aquire lock and set detection data
-        self.__detectionLock.acquire()
-        self.__detections = data
-        self.__detectionLock.release()
-
-    def stop(self):
-        # Stop the thread by setting started flag to False and join the thread
-        self.__started = False
-        self.__thread.join()
-
-    def __del__(self):
-        # Destructor to call the stop method when the object is deleted
-        self.stop
+    def _handle_session(self, ser):
+        while not self._stop_event.is_set():
+            line = ser.readline()
+            if not line:
+                # read_timeout fired; loop back and re-check stop_event
+                continue
+            self._record_rx(len(line))
+            # errors="replace" defends against stray non-ASCII bytes on the
+            # line without killing the thread; we just won't match the handshake.
+            decoded = line.decode("ascii", errors="replace").strip()
+            if decoded == self._HANDSHAKE:
+                with self._detection_lock:
+                    packet_bytes = V5SerialPacket(
+                        self._MAP_PACKET_TYPE, self._detections).to_Serial()
+                n = ser.write(packet_bytes)
+                self._record_tx(n)
+                self._handshakes_received += 1
+                self._packets_sent += 1
+            elif decoded:
+                self._log.debug("unexpected line on data port: %r", decoded)

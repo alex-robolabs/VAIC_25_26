@@ -1,14 +1,35 @@
-import struct
-import threading
-from threading import Lock
-import serial
-import time
+"""Jetson <-> V5 GPS sensor link.
+
+Wire protocol (unchanged from original VEX reference implementation):
+  - V5 streams 16-byte binary frames, each terminated by 0xCC 0x33
+  - Fields (little-endian):
+        [1 byte][status:u8][x:i16][y:i16][z:i16][az:i16][el:i16][rot:i16][0xCC][0x33]
+  - x/y/z are in units of 0.1 mm; angles in units of 180/32768 degrees.
+
+Position class and offset logic preserved verbatim. V5GPS now subclasses
+SerialLink for self-healing reconnection, watchdog, and logging.
+
+Public API is unchanged:
+    gps = V5GPS()
+    gps.start()
+    pos = gps.getPosition()          # Position object
+    gps.isConnected()                # True iff data is fresh
+    gps.updateOffset(gpsOffset)      # from V5Web
+    gps.stop()
+"""
+
 import math
+import struct
+from threading import Lock
+
 from filter import LiveFilter
-import numpy as np 
+from serial_link import SerialLink
+
 
 class Position:
-    # Status flags for different conditions
+    """GPS / localization state sent from V5 to Jetson, and forwarded
+    to V5Web for the dashboard. Kept as a plain mutable object for
+    backwards compatibility with consumers that read individual fields."""
 
     STATUS_CONNECTED    = 0x00000001
     STATUS_NODOTS       = 0x00000002
@@ -22,8 +43,7 @@ class Position:
     STATUS_NOSOLUTION   = 0x00000200
     STATUS_KALMAN_EST   = 0x00100000
 
-    def __init__(self, frameCount: int, status: int, x: float, y: float, z: float, azimuth: float, elevation: float, rotation: float):
-        # Initialization of position attributes
+    def __init__(self, frameCount, status, x, y, z, azimuth, elevation, rotation):
         self.frameCount = frameCount
         self.status = status
         self.x = x
@@ -34,11 +54,12 @@ class Position:
         self.rotation = rotation
 
     def to_Serial(self):
-        # Converts the position attributes to serial (binary) format
-        return struct.pack('<iiffffff', self.frameCount, self.status, self.x, self.y, self.z, self.azimuth, self.elevation, self.rotation)
-    
+        return struct.pack('<iiffffff',
+                           self.frameCount, self.status,
+                           self.x, self.y, self.z,
+                           self.azimuth, self.elevation, self.rotation)
+
     def to_JSON(self):
-        # Converts the position attributes to JSON format
         outData = {}
         outData['frameCount'] = self.frameCount
         outData['status'] = self.status
@@ -50,142 +71,50 @@ class Position:
         outData['rotation'] = self.rotation
         return outData
 
-class V5GPS:
-    # Packet type identifier
-    __MAP_PACKET_TYPE = 0x0001
 
+class V5GPS(SerialLink):
+    """Self-healing V5 GPS link."""
 
-    def __init__(self, port = None):
-        # Initialization of GPS attributes including port, position, and offsets
-        self.__dev = port
-        self.__started = False
-        self.__ser = None
-        self.__isConnected = False
-        self.__position = Position(0, 0, 0, 0, 0, 0, 0, 0)
-        self.__positionLock = Lock()
-        self.__HEADINGOFFSET =  0 # Degree offset of gps
-        # When x and y offsets are updated, offsets are automatically converted to meters
-        self.__GPSXOFFSET = 0  # GPS offset in default units (meters) (X-axis)
-        self.__GPSYOFFSET = 0  # GPS offset in default units (meters) (Y-axis)
-        self.__OFFSETUNITS = "meters"
+    def __init__(self, port=None):
+        super().__init__(
+            name="v5-gps",
+            port_filter=lambda d: "GPS" in d.description and "User" in d.description,
+            baudrate=115200,
+            read_timeout=1.0,
+            watchdog_seconds=5.0,
+        )
+        self._explicit_port = port
+        self._position = Position(0, 0, 0, 0, 0, 0, 0, 0)
+        self._position_lock = Lock()
+        self._frame_count = 0
+        self._heading_offset = 0
+        self._gps_x_offset = 0
+        self._gps_y_offset = 0
+        self._offset_units = "meters"
+        self._filter = LiveFilter(10)
 
-        self.__filter = LiveFilter(10)
+    # ---------- public API (preserved) ----------
 
-    def start(self):
-        # Starts the GPS thread
-        self.__started = True
-        self.__thread = threading.Thread(target=self.__run, args=())
-        self.__thread.daemon = True
-        self.__thread.start()
-
-    def __run(self):
-        # Main method to run the GPS data reading and processing
-        # Includes connection establishment, data reading, coordinate transformation, and status handling
-        # Setting local variables for GPS Offset from global
-        count = 1
-
-        while self.__started:
-            port = self.__dev
-
-            try:
-                if(port == None):
-                    from serial.tools.list_ports import comports
-                    devices = [dev for dev in comports() if "GPS" in dev.description and "User" in dev.description]
-                    if(len(devices) == 0 and count <= 5):
-                        print("No GPS detected.")
-                        time.sleep(1)  # Wait for 1 second before retrying
-                        count += 1
-                        continue
-                    elif(count > 5):
-                        self.__isConnected = False
-                        return None  # Return None if no devices found after 5 tries
-                    else:
-                        self.__isConnected = True
-                        port = devices[0].device
-
-                print("Connecting to ", port)
-
-                self.__ser = serial.Serial(port, 115200, timeout=10)
-                self.__ser.flushInput()
-                self.__ser.flushOutput()
-
-                self.__frameCount = 0
-
-                while self.__started:
-                    # Read data from the serial port
-                    data = self.__ser.read_until(b'\xCC\x33')
-                    if(len(data) == 16):
-                        self.__frameCount = self.__frameCount + 1
-                        status = data[1]
-                        x, y, z, az, el, rot = struct.unpack('<hhhhhh', data[2:14])
-                        # Converts the data into meters and degrees
-                        x = x / 10000.0
-                        y = y / 10000.0
-                        z = z / 10000.0
-                        az = ((az/ 32768.0 * 180.0) - self.__HEADINGOFFSET) % 360
-                        el = el / 32768.0 * 180.0
-                        rot = rot / 32768.0 * 180.0
-
-                        # Adjusts the x and y position to be true to robot position based on positon of GPS sensor relative to robot
-                        theta = math.radians(az)
-                        new_GPSXOFFSET = self.__GPSXOFFSET * math.cos(theta) + self.__GPSYOFFSET * math.sin(theta)
-                        new_GPSYOFFSET = -self.__GPSXOFFSET * math.sin(theta) + self.__GPSYOFFSET * math.cos(theta)
-
-                        x = x - new_GPSXOFFSET
-                        y = y - new_GPSYOFFSET
-
-                        localStatus = Position.STATUS_CONNECTED
-                        if(status > 0 and status < 32):
-                            localStatus = localStatus | (1 << status)
-
-                        # print( x, y, z, az, el, rot, " status: ", hex(status), " Local Status: ", hex(localStatus))
-                        
-                        # Apply filter to smooth x, y, and azimuth
-
-                        #save data if it is valid
-                        if(status == 20):
-                            x, y = self.__filter.update(x, y)
-                            self.__positionLock.acquire()
-                            self.__position.x = x
-                            self.__position.y = y
-                            self.__position.z = z
-                            self.__position.azimuth = az
-                            self.__position.elevation = el
-                            self.__position.rotation = rot
-                            self.__position.status = localStatus
-                            self.__position.frameCount = self.__frameCount
-                            self.__positionLock.release()
-
-            # To close the serial port gracefully, use Ctrl+C to break the loop
-            except serial.SerialException as e:
-                print("Could not connect to ", port, ". Exception: ", e)
-                self.__isConnected = False
-                time.sleep(1)
-        
-            if(self.__ser.isOpen()):
-                self.__ser.close()
-
-            self.__frameCount = 0
-            self.__positionLock.acquire()
-            self.__position.status = 0
-            self.__positionLock.release()
-
-        print("V5SerialComms thread stopped.")
+    def isConnected(self):
+        """Alias for is_healthy(). Preserves old API so V5Web and
+        pushback.py don't need to know about the new method name."""
+        return self.is_healthy()
 
     def getPosition(self):
-        # Retrieves the current position
-        self.__positionLock.acquire()
-        nowPosition = self.__position
-        self.__positionLock.release()
+        """Defensive copy so callers can't accidentally mutate our state."""
+        with self._position_lock:
+            return Position(
+                self._position.frameCount,
+                self._position.status,
+                self._position.x,
+                self._position.y,
+                self._position.z,
+                self._position.azimuth,
+                self._position.elevation,
+                self._position.rotation,
+            )
 
-        return nowPosition
-    
-    def isConnected(self):
-        # Checks if the GPS is connected
-        return self.__isConnected
-    
     def updateOffset(self, newOffset):
-        # Updates the offset values for GPS data
         unitDivisor = 1
         if newOffset.unit in ("CM", "cm"):
             unitDivisor = 100
@@ -195,16 +124,77 @@ class V5GPS:
             unitDivisor = 39.3701
         elif newOffset.unit not in ("m", "meters", "M"):
             raise Exception("Invalid argument: Unit not accepted")
-        self.__HEADINGOFFSET = newOffset.heading_offset
-        self.__GPSXOFFSET = newOffset.x / unitDivisor
-        self.__GPSYOFFSET = newOffset.y / unitDivisor
-        self.__OFFSETUNITS = "meters"   # Units will always be saved as meters and converted from input units
+        self._heading_offset = newOffset.heading_offset
+        self._gps_x_offset = newOffset.x / unitDivisor
+        self._gps_y_offset = newOffset.y / unitDivisor
+        self._offset_units = "meters"
 
-    def stop(self):
-        # Stops the GPS thread
-        self.__started = False
-        self.__thread.join()
+    # ---------- SerialLink overrides ----------
 
-    def __del__(self):
-        # Destructor to call the stop method when the object is deleted
-        self.stop
+    def _find_port(self):
+        if self._explicit_port is not None:
+            return self._explicit_port
+        return super()._find_port()
+
+    def _handle_session(self, ser):
+        self._frame_count = 0
+        try:
+            while not self._stop_event.is_set():
+                data = ser.read_until(b'\xCC\x33')
+                if not data:
+                    # read_timeout fired with no data; loop back
+                    continue
+                self._record_rx(len(data))
+                if len(data) != 16:
+                    self._log.debug(
+                        "frame size mismatch: %d bytes (expected 16)", len(data))
+                    continue
+                try:
+                    self._process_frame(data)
+                except struct.error as e:
+                    self._log.warning("frame decode error: %s", e)
+        finally:
+            # Mark disconnected when leaving the session so consumers
+            # (V5Web, pushback) see a clean "GPS down" state immediately.
+            with self._position_lock:
+                self._position.status = 0
+
+    def _process_frame(self, data):
+        self._frame_count += 1
+        status = data[1]
+        x_raw, y_raw, z_raw, az_raw, el_raw, rot_raw = struct.unpack(
+            '<hhhhhh', data[2:14])
+
+        x = x_raw / 10000.0
+        y = y_raw / 10000.0
+        z = z_raw / 10000.0
+        az = ((az_raw / 32768.0 * 180.0) - self._heading_offset) % 360
+        el = el_raw / 32768.0 * 180.0
+        rot = rot_raw / 32768.0 * 180.0
+
+        # Rotate the stored GPS offset by current heading so it cancels
+        # the offset of the GPS sensor from robot origin correctly.
+        theta = math.radians(az)
+        new_x_offset = (self._gps_x_offset * math.cos(theta)
+                        + self._gps_y_offset * math.sin(theta))
+        new_y_offset = (-self._gps_x_offset * math.sin(theta)
+                        + self._gps_y_offset * math.cos(theta))
+        x -= new_x_offset
+        y -= new_y_offset
+
+        local_status = Position.STATUS_CONNECTED
+        if 0 < status < 32:
+            local_status |= (1 << status)
+
+        # status == 20 is the "valid solution" code in the original firmware.
+        if status == 20:
+            x, y = self._filter.update(x, y)
+            with self._position_lock:
+                self._position.x = x
+                self._position.y = y
+                self._position.z = z
+                self._position.azimuth = az
+                self._position.elevation = el
+                self._position.rotation = rot
+                self._position.status = local_status
+                self._position.frameCount = self._frame_count
