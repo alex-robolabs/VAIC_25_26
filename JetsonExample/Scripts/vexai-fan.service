@@ -1,0 +1,11 @@
+[Unit]
+Description=Set Jetson PWM fan to fixed level for VEX AI workload
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "echo 200 > /sys/devices/pwm-fan/target_pwm && echo Fan PWM set to: $(cat /sys/devices/pwm-fan/target_pwm)"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

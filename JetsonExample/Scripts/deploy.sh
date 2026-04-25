@@ -80,15 +80,25 @@ scp "${SSH_OPTS[@]}" \
     "$SOURCE_DIR/show_ports.py" \
     "$TARGET:$REMOTE_BASE/"
 
-echo "[deploy] copying restart.sh..."
+echo "[deploy] copying restart.sh + vexai-fan.service..."
 scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/restart.sh" "$TARGET:$REMOTE_BASE/Scripts/"
+scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/vexai-fan.service" "$TARGET:/tmp/vexai-fan.service"
 
-echo "[deploy] running restart + verify on remote (one sudo prompt unless NOPASSWD)..."
+echo "[deploy] running install + restart + verify on remote (one sudo prompt unless NOPASSWD)..."
 # -t forces a pty so sudo can prompt cleanly. All sudo calls run inside
 # this single ssh session, so sudo's credential cache covers them.
 ssh -t "${SSH_OPTS[@]}" "$TARGET" "
     set -e
     chmod +x $REMOTE_BASE/Scripts/restart.sh
+
+    echo '[remote] installing vexai-fan.service to /etc/systemd/system/...'
+    cat /tmp/vexai-fan.service | sudo tee /etc/systemd/system/vexai-fan.service >/dev/null
+    rm -f /tmp/vexai-fan.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable vexai-fan
+    sudo systemctl restart vexai-fan
+    echo \"[remote] vexai-fan: \$(sudo systemctl is-active vexai-fan), enabled=\$(sudo systemctl is-enabled vexai-fan), PWM target=\$(cat /sys/devices/pwm-fan/target_pwm) cur=\$(cat /sys/devices/pwm-fan/cur_pwm)\"
+
     sudo systemctl restart vexai
     sleep 3
     sudo systemctl status vexai --no-pager | head -8
