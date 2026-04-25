@@ -22,6 +22,7 @@ All under `JetsonExample/`:
 | `pushback.py` | **Patched** | Adds logging init and a periodic health line in the main loop |
 | `Scripts/restart.sh` | **New** | One-command restart helper with optional USB rebind |
 | `Scripts/deploy.sh` | **New** | One-command push to a Jetson (this script) |
+| `Scripts/vexai-fan.service` | **New** | Systemd unit: sets PWM fan to 200/255 at boot. Compensates for the custom "VEX" `nvpmodel` profile not defining a fan policy. Installed to `/etc/systemd/system/` and enabled by `deploy.sh`. |
 
 Calibration files (`gps_offsets.json`, `camera_offsets.json`,
 `color_correction.json`) are **not touched**. Each Jetson keeps its
@@ -85,12 +86,18 @@ On each Jetson:
 ```bash
 sudo visudo -f /etc/sudoers.d/vexai
 # Add the line:
-vex ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/bin/journalctl, /usr/bin/tee, /usr/bin/pkill
+vex ALL=(ALL) NOPASSWD: /bin/systemctl, /bin/journalctl, /usr/bin/tee, /usr/bin/pkill
 ```
 
 This grants passwordless sudo only for the specific commands
 `deploy.sh` and `restart.sh` need — not a blanket NOPASSWD. Adjust
 username if yours isn't `vex`.
+
+> **Path note:** on the JetPack 4.6.1 Ubuntu 18.04 base, `journalctl`
+> lives at `/bin/journalctl` (no `/usr/bin/journalctl` symlink). Verify
+> on your Jetson with `which journalctl` and adjust the rule if it
+> reports a different path. The other three commands (`systemctl`,
+> `tee`, `pkill`) match what's on disk by default.
 
 With both of the above set up, `./deploy.sh <host>` runs with zero
 prompts.
@@ -119,14 +126,18 @@ done
 The script:
 
 1. Backs up the originals on the remote (`~/vexai-backup-YYYYMMDD-HHMMSS.tgz`).
-2. Copies the seven Python/helper files into `JetsonExample/`.
-3. Copies `restart.sh` into `JetsonExample/Scripts/`.
+2. Copies the patched Python files into `JetsonExample/`.
+3. Copies `restart.sh` into `JetsonExample/Scripts/` and `vexai-fan.service` into `/tmp/`.
 4. `chmod +x Scripts/restart.sh`.
-5. `sudo systemctl restart vexai`.
-6. Waits 15 s for import-heavy service startup.
-7. Greps the journal for `connected on` / `watchdog tripped` / `ERROR`
+5. Installs `vexai-fan.service` to `/etc/systemd/system/` (via `sudo tee`),
+   `daemon-reload`, `enable`, `restart` — prints `is-active`, `is-enabled`,
+   and the resulting `target_pwm` / `cur_pwm` for verification. Idempotent;
+   safe to re-run.
+6. `sudo systemctl restart vexai`.
+7. Waits 15 s for import-heavy service startup.
+8. Greps the journal for `connected on` / `watchdog tripped` / `ERROR`
    lines so you have an immediate signal.
-8. Prints a reminder to check the V5 Brain LCD for real packet flow
+9. Prints a reminder to check the V5 Brain LCD for real packet flow
    (see "Success signal" below).
 
 ### Option B — USB stick (no network)
@@ -143,7 +154,7 @@ mkdir -p "$USB/vexai-patch/Scripts"
 cp serial_link.py vexai_logging.py show_ports.py \
    V5Comm.py V5Position.py pushback.py \
    "$USB/vexai-patch/"
-cp Scripts/restart.sh "$USB/vexai-patch/Scripts/"
+cp Scripts/restart.sh Scripts/vexai-fan.service "$USB/vexai-patch/Scripts/"
 ```
 
 On each Jetson:
@@ -157,6 +168,12 @@ tar czf ~/vexai-backup-$(date +%Y%m%d-%H%M%S).tgz V5Comm.py V5Position.py pushba
 cp "$USB/vexai-patch/"*.py "$REPO/"
 cp "$USB/vexai-patch/Scripts/restart.sh" "$REPO/Scripts/"
 chmod +x "$REPO/Scripts/restart.sh"
+
+# Install the fan service (idempotent — safe to re-run)
+sudo cp "$USB/vexai-patch/Scripts/vexai-fan.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vexai-fan
+
 sudo systemctl restart vexai
 ```
 
@@ -175,8 +192,12 @@ scp serial_link.py vexai_logging.py show_ports.py \
     V5Comm.py V5Position.py pushback.py \
     $TARGET:~/VAIC_25_26/JetsonExample/
 scp Scripts/restart.sh $TARGET:~/VAIC_25_26/JetsonExample/Scripts/
+scp Scripts/vexai-fan.service $TARGET:/tmp/
 
 ssh -t $TARGET "chmod +x ~/VAIC_25_26/JetsonExample/Scripts/restart.sh && \
+                cat /tmp/vexai-fan.service | sudo tee /etc/systemd/system/vexai-fan.service >/dev/null && \
+                sudo systemctl daemon-reload && \
+                sudo systemctl enable --now vexai-fan && \
                 sudo systemctl restart vexai"
 ```
 
