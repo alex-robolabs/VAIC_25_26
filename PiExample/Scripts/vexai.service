@@ -1,0 +1,26 @@
+[Unit]
+Description=VEX AI pushback main loop (Pi)
+After=multi-user.target network.target
+
+[Service]
+User=vex
+Type=simple
+ExecStart=/bin/bash /home/vex/VAIC_25_26/PiExample/Scripts/run.sh
+Restart=always
+RestartSec=2
+
+# Comms layer ops knobs. See docs/pi-comms-design.md for rationale.
+# Override at runtime by creating
+#   /etc/systemd/system/vexai.service.d/local.conf
+# with one or more lines like:
+#   [Service]
+#   Environment="VEXAI_LOG_LEVEL=DEBUG"
+Environment="VEXAI_LOG_LEVEL=INFO"
+Environment="VEXAI_HEALTH_LOG_INTERVAL_S=30"
+Environment="VEXAI_V5_READ_TIMEOUT_S=1.0"
+Environment="VEXAI_V5_MAX_TIMEOUTS=5"
+Environment="VEXAI_V5_RECONNECT_BACKOFF_MIN_S=0.5"
+Environment="VEXAI_V5_RECONNECT_BACKOFF_MAX_S=3.0"
+
+[Install]
+WantedBy=multi-user.target
