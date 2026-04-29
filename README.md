@@ -3,36 +3,61 @@
 This is Robolabs' fork of VEX's `VAIC_25_26` reference repository for
 the VEX AI Competition. It tracks
 [VEX-Robotics/VAIC_25_26](https://github.com/VEX-Robotics/VAIC_25_26)
-upstream and carries a self-healing V5 ↔ Jetson comms patch that
-makes the reference architecture suitable for real development loops
-rather than just match-day operation.
+upstream and carries self-healing V5 ↔ companion-board comms layers
+that make the reference architecture suitable for real development
+loops rather than just match-day operation.
 
-## What's different from upstream
+## Supported platforms
 
-The Jetson-side serial connection manager has been rewritten to
-reconnect automatically after V5 reprograms, battery swaps, USB drops,
-and silent stalls. The wire protocol is unchanged — no V5 brain
-firmware changes are required.
+This fork supports both VEX-blessed AI companion boards. They live in
+sibling directories and don't depend on each other:
 
-- Technical writeup: **[`docs/comms-patch.md`](./docs/comms-patch.md)**
-- Deployment guide: **[`JetsonExample/DEPLOY.md`](./JetsonExample/DEPLOY.md)**
+- **Jetson Nano (legacy, frozen patch)** — the existing fleet (three
+  fielded units running through the current season). Patch lives
+  in `JetsonExample/`. No further development planned; bug fixes only.
+- **Raspberry Pi 5 + Coral USB Accelerator (active development)** —
+  the production target going forward. Cleaner internals, modern
+  Python features, automated tests, structured state machine for
+  link health. Lives in `PiExample/`.
 
-If you're picking up a Jetson that's already running the patch, the
-success signal is simple: check the V5 Brain's LCD dashboard for
-`Packets > 0` and increasing.
+The Pi work is a fresh design rather than a port of the Nano patch —
+see **[`docs/pi-comms-design.md`](./docs/pi-comms-design.md)** for the
+design doc and what changed.
 
 ## Quick start
 
-Deploy to one Jetson from your Mac:
+**For a Pi (active platform):**
+
+```bash
+cd PiExample/Scripts
+./bootstrap.sh <pi-ip> pi-<size>     # one-time per host
+./deploy_pi.sh <pi-ip>               # ongoing deploys
+```
+
+Full guide: **[`PiExample/DEPLOY.md`](./PiExample/DEPLOY.md)**
+
+**For an existing Jetson Nano:**
 
 ```bash
 cd JetsonExample/Scripts
 ./deploy.sh <jetson-ip>
 ```
 
-Then look at the V5 Brain's LCD — that's the ground truth. See
-`DEPLOY.md` for prereqs, SSH-key setup, troubleshooting, and the
-alternative deploy paths (USB stick, manual scp).
+Full guide: **[`JetsonExample/DEPLOY.md`](./JetsonExample/DEPLOY.md)**
+
+In both cases, the success signal is the same: walk to the robot and
+check the V5 Brain's LCD for `Packets > 0` and increasing.
+
+## Documentation
+
+- **[`docs/comms-patch.md`](./docs/comms-patch.md)** — Nano-side comms
+  patch technical writeup
+- **[`docs/pi-comms-design.md`](./docs/pi-comms-design.md)** — Pi-side
+  comms layer design doc (v2)
+- **[`JetsonExample/DEPLOY.md`](./JetsonExample/DEPLOY.md)** — Nano
+  deployment guide
+- **[`PiExample/DEPLOY.md`](./PiExample/DEPLOY.md)** — Pi deployment
+  guide
 
 ## Upstream tracking
 
@@ -48,8 +73,9 @@ git fetch upstream
 git merge upstream/main
 ```
 
-The patch lives entirely in `JetsonExample/` and `docs/`, so upstream
-merges should stay clean.
+All patches and new code live in `JetsonExample/`, `PiExample/`, and
+`docs/`. Upstream changes to `V5Example/`, `JetsonImages/`, and
+`JetsonWebDashboard/` flow through cleanly.
 
 ---
 
