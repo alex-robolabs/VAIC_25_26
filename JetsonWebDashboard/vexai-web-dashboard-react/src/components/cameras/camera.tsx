@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from "uuid";
 import { config } from "../../util/config";
 import { PhotoCamera } from "@mui/icons-material";
 import Konva from "konva";
-import { Jimp } from "jimp";
+import Jimp from "jimp";
 
 interface CameraProps {
   img: Image;
