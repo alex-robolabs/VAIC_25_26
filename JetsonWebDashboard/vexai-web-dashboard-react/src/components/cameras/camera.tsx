@@ -60,9 +60,9 @@ const Camera = ({ img, detections }: CameraProps) => {
       const cameraCopy = ref.current.src;
       const canvasImage = await Jimp.read(canvasCopy.toDataURL({mimeType: "image/png"}));
       const cameraImage = await Jimp.read(cameraCopy);
-      cameraImage.resize({w: canvasImage.width, h: canvasImage.height})
-      cameraImage.composite(canvasImage);
-      const base64 = await cameraImage.getBase64("image/png");
+      cameraImage.resize(canvasImage.bitmap.width, canvasImage.bitmap.height);
+      cameraImage.composite(canvasImage, 0, 0);
+      const base64 = await cameraImage.getBase64Async("image/png");
 
       const currentDate = new Date().toISOString();
       const link = document.createElement("a");
