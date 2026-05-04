@@ -47,8 +47,7 @@ class CUDABackend(ModelBackend):
                     trt.OnnxParser(network, TRT_LOGGER) as parser, \
                     trt.Runtime(TRT_LOGGER) as runtime:
 
-                config.max_workspace_size = 1 << 28  # Set maximum workspace size to 256MiB
-                builder.max_batch_size = 1
+                config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)  # 256 MiB workspace
 
                 # Check if ONNX file exists
                 if not os.path.exists(onnx_file_path):
