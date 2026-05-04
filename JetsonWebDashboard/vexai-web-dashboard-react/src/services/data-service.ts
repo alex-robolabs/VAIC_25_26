@@ -38,7 +38,7 @@ export class DataService extends EventEmitter {
    * Creates a new WebSocket
    */
   public createSocketConnection = () => {
-    this.socket = new WebSocket(`ws://${this.ip}:${this.port}`);
+    this.socket = new WebSocket(`ws://${window.location.hostname}:${this.port}`);
 
     this.socket.onopen = () => {
       this.emit("socketConnected");
