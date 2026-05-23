@@ -66,6 +66,9 @@ class V5WebData:
 
     def __new_client(self, client, server):
         # Called for every client connecting (after handshake)
+        if client is None:
+            print("New client connected (id unknown — handshake incomplete)")
+            return
         print("New client connected and was given id %d" % client['id'])
 
     def __getCameraOffset(self):
@@ -81,7 +84,12 @@ class V5WebData:
         return self.__colorCorrection
 
     def __client_left(self, client, server):
-        # Callback function for client disconnection
+        # Callback function for client disconnection.
+        # websocket_server invokes this from the StreamRequestHandler's
+        # finish() even when the upstream handshake failed (KeyError on
+        # 'upgrade' for non-WS clients) — in that path `client` is None.
+        if client is None:
+            return
         print("Client(%d) disconnected" % client['id'])
 
     def __getStatsElement(self):

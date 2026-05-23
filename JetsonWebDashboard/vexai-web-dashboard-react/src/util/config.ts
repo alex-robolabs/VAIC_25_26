@@ -5,7 +5,11 @@ import { images } from "./images";
  * General configuration for the application
  */
 export const config = {
-  socketIP: "10.42.0.1",
+  // Derive from the page's own host so the dashboard works whether viewed
+  // from the Pi itself (localhost), a coach laptop on the robot hotspot
+  // (10.42.0.1), or any other host on the dev LAN. Falls back to the
+  // historical hotspot IP for non-browser contexts (SSR, tests).
+  socketIP: typeof window !== "undefined" ? window.location.hostname : "10.42.0.1",
   socketPort: "3030",
 
   /**
